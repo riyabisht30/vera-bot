@@ -26,7 +26,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 TEAM_NAME    = "VeraBuilder"
 TEAM_MEMBERS = ["Vera Participant"]
 CONTACT_EMAIL = "participant@example.com"
-MODEL_NAME   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+MODEL_NAME   = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -203,7 +203,7 @@ def call_llm(system_prompt: str, user_message: str) -> str:
             err_str = str(exc)
             if "429" in err_str or "rate" in err_str.lower():
                 if attempt < 2:
-                    time.sleep(30)
+                    time.sleep(3)
                     continue
             raise RuntimeError(f"Groq API error: {exc}")
     raise RuntimeError("Groq API: max retries exceeded")
@@ -403,7 +403,7 @@ async def metadata():
     return {
         "team_name": TEAM_NAME,
         "team_members": TEAM_MEMBERS,
-        "model": "llama-3.3-70b-versatile (Groq)",
+        "model": f"{MODEL_NAME} (Groq)",
         "approach": (
             "4-context LLM composer (Llama 3.3 70B via Groq) with trigger-kind dispatch, "
             "auto-reply detection (3-strike exit), intent-transition routing, "
@@ -496,9 +496,9 @@ async def tick(body: TickBody):
         urgency = trg.get("urgency", 1)
         trigger_payloads.append((urgency, trg_id, trg))
 
-    # Highest urgency first, cap at 20
+    # Highest urgency first, cap at 3 per tick to stay within 15s judge timeout
     trigger_payloads.sort(key=lambda x: -x[0])
-    trigger_payloads = trigger_payloads[:20]
+    trigger_payloads = trigger_payloads[:3]
 
     actions = []
 
