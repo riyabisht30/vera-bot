@@ -124,93 +124,50 @@ def is_negative_intent(msg: str) -> bool:
 
 
 # ─────────────────────────────────────────────
-# SYSTEM PROMPT — shared for all LLM calls
+# TRIGGER-KIND → PRIORITY DISPATCH INSTRUCTIONS
 # ─────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are Vera, magicpin's AI merchant assistant helping Indian small business owners grow.
-
-STRICT RULES (violations are scored 0 or penalised):
-1. NO URLs in the message body — Meta policy, hard ban.
-2. EXACTLY ONE call-to-action (CTA), placed at the very END of the message.
-3. ONLY use facts present in the provided contexts. NEVER fabricate numbers, citations, competitor names, offers, or slot times.
-4. Match the merchant's language: if identity.languages includes "hi", weave in Hindi-English code-mix naturally.
-5. Address merchant by identity.owner_first_name (or Doc/Dr. Firstname for dentists).
-6. Peer / colleague tone — NOT promotional. "AMAZING DEAL!" is penalised.
-7. For research/compliance items: ALWAYS end with the source citation (e.g., "— JIDA Oct 2026 p.14").
-8. No long preambles. Start with the merchant's name and the hook — no "I hope you're doing well."
-9. Do NOT re-introduce yourself after the first message in a conversation.
-10. For customer-facing messages (send_as=merchant_on_behalf): warm-clinical, no overclaims, respect consent scope.
-
-COMPULSION LEVERS — use 1-2 per message:
-• Specificity / verifiability — exact number, date, percentage, source from context
-• Loss aversion — "you're missing X" / "before this window closes"
-• Social proof — "N merchants in your locality did Y this month"
-• Effort externalization — "I've already drafted it — just say go" / "5-min setup"
-• Curiosity — "want to see who?" / "want the full breakdown?"
-• Reciprocity — "I noticed X about your account, thought you'd want to know"
-• Asking the merchant — "what's your most-asked treatment this week?"
-• Single binary commit — Reply YES / STOP (not multi-choice)
-
-OUTPUT FORMAT — return ONLY valid JSON, no markdown fences:
-{
-  "body": "the WhatsApp message text",
-  "cta": "open_ended | binary_yes_no | binary_yes_stop | multi_choice_slot | none",
-  "send_as": "vera | merchant_on_behalf",
-  "suppression_key": "copy from trigger.suppression_key",
-  "rationale": "concise: why this message, which lever used, why now"
-}"""
-
-
-# ─────────────────────────────────────────────
-# TRIGGER-KIND → FRAMING HINTS
-# ─────────────────────────────────────────────
-
-KIND_HINTS: dict[str, str] = {
+KIND_PRIORITY: dict[str, str] = {
     "research_digest":
-        "Clinical insight from a trusted source. Include source citation at the end. "
-        "Tie to THIS merchant's patient/customer profile. CTA: open_ended (offer to pull abstract or draft patient content).",
-    "regulation_change":
-        "Compliance deadline with specific date. Use urgency level 4+. Offer to check their setup. CTA: binary_yes_no.",
+        "PRIORITY: cite the paper title, trial_n, and source page number from the digest item.",
     "recall_due":
-        "Patient recall reminder. Mention how long since last visit. Offer 2 specific slots from trigger payload. "
-        "Use merchant's active offer price. CTA: multi_choice_slot.",
+        "PRIORITY: name the customer's last visit date and the exact recall window that opened.",
     "perf_dip":
-        "Alert to specific metric drop (name the metric, cite the percentage). Offer one concrete action. CTA: open_ended.",
+        "PRIORITY: lead with the exact percentage drop and the peer benchmark.",
     "perf_spike":
-        "Positive reinforcement with the exact number. Build momentum — offer to amplify. CTA: open_ended.",
-    "milestone_reached":
-        "Celebrate the specific milestone. Turn it into social proof or a Google post opportunity. CTA: binary_yes_no.",
+        "PRIORITY: frame as a momentum moment, reference the exact % increase.",
     "festival_upcoming":
-        "Time-sensitive seasonal opportunity. Category-specific angle (salons: bridal, restaurants: catering). "
-        "Name the festival and days until. CTA: binary_yes_no.",
-    "ipl_match_today":
-        "Time-sensitive local event. Provide contrarian data if available (e.g., Saturday IPL = -12% covers). "
-        "Leverage existing offer. CTA: binary_yes_no.",
-    "curious_ask_due":
-        "Low-stakes question to the merchant. Offer a concrete deliverable in return (Google post, reply template). "
-        "Keep it to one question. CTA: open_ended.",
-    "review_theme_emerged":
-        "Specific review theme with occurrence count from context. Offer response draft or action. CTA: binary_yes_no.",
+        "PRIORITY: name the festival and days remaining, connect to a real offer in catalog.",
     "dormant_with_vera":
-        "Re-engagement lead with value, not guilt. Mention something specific they haven't done yet. CTA: binary_yes_no.",
+        "PRIORITY: no guilt-trip; use curiosity lever with a business insight.",
+    "regulation_change":
+        "PRIORITY: state the compliance deadline date and the specific rule that changed.",
+    "milestone_reached":
+        "PRIORITY: cite the exact milestone number, offer to turn it into a Google post.",
+    "ipl_match_today":
+        "PRIORITY: name today's match teams and provide contrarian covers data if available.",
+    "curious_ask_due":
+        "PRIORITY: ask exactly one low-stakes question, offer a concrete deliverable in return.",
+    "review_theme_emerged":
+        "PRIORITY: cite the exact review theme and occurrence count from context.",
     "renewal_due":
-        "Subscription expiry with exact days remaining. Show what they'd lose (visibility, Vera features). CTA: binary_yes_no.",
+        "PRIORITY: state exact days remaining and list what visibility they lose on expiry.",
     "winback_eligible":
-        "Merchant who lapsed. Show what improved while they were away. Low-commitment offer. CTA: open_ended.",
+        "PRIORITY: show one specific improvement since they lapsed; keep ask low-commitment.",
     "wedding_package_followup":
-        "Bridal journey. Use exact days-to-wedding count from trigger. Reference trial completed. CTA: binary_yes_no.",
+        "PRIORITY: use exact days-to-wedding from trigger; reference the trial they completed.",
     "competitor_opened":
-        "Nearby competitor info. Frame as preparation opportunity, not fear. Offer to strengthen listing. CTA: open_ended.",
+        "PRIORITY: frame as prep opportunity not fear; offer one concrete listing improvement.",
     "supply_alert":
-        "Urgent: use batch numbers exactly from trigger payload. Count affected customers from aggregate. CTA: binary_yes_no.",
+        "PRIORITY: use exact batch numbers from trigger payload; count affected customers.",
     "chronic_refill_due":
-        "Precise medication names + exact run-out date. Show total + savings. Delivery ETA. CTA: binary_yes_no.",
+        "PRIORITY: use precise medication names and exact run-out date from trigger.",
     "customer_lapsed_soft":
-        "Lapsed customer (3-6 months). No guilt trip. Personal connection + relevant new offer. CTA: binary_yes_no.",
+        "PRIORITY: no guilt; personal connection + one relevant new offer with ₹ price.",
     "customer_lapsed_hard":
-        "Long-lapsed customer (6+ months). Low-commitment trial offer. CTA: binary_yes_no.",
+        "PRIORITY: low-commitment trial offer; acknowledge the gap without blame.",
     "appointment_tomorrow":
-        "Reminder with appointment time + any prep instructions. Brief, practical. CTA: none or binary_yes_no.",
+        "PRIORITY: state appointment time and any prep instructions. Keep it brief.",
 }
 
 
@@ -218,15 +175,15 @@ KIND_HINTS: dict[str, str] = {
 # LLM CALL
 # ─────────────────────────────────────────────
 
-def call_llm(prompt: str) -> str:
+def call_llm(system_prompt: str, user_message: str) -> str:
     """Call Groq LLM with retry on rate-limit errors."""
     for attempt in range(3):
         try:
             resp = groq_client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user",   "content": prompt},
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_message},
                 ],
                 temperature=0,
                 response_format={"type": "json_object"},
@@ -242,6 +199,55 @@ def call_llm(prompt: str) -> str:
     raise RuntimeError("Groq API: max retries exceeded")
 
 
+def build_system_prompt(kind: str, category: dict, merchant: dict,
+                        trigger: dict, customer: dict | None) -> str:
+    """Build the dynamic system prompt with trigger-kind dispatch."""
+    priority = KIND_PRIORITY.get(kind, "PRIORITY: match trigger kind to appropriate framing.")
+
+    category_json  = json.dumps(category,  indent=2, ensure_ascii=False)
+    merchant_json  = json.dumps(merchant,  indent=2, ensure_ascii=False)
+    trigger_json   = json.dumps(trigger,   indent=2, ensure_ascii=False)
+    customer_json  = json.dumps(customer,  indent=2, ensure_ascii=False) if customer else "none"
+
+    return f"""You are Vera, magicpin's merchant AI assistant on WhatsApp. Compose ONE message.
+
+{priority}
+
+SCORING DIMENSIONS (each 0-10, must score 9+ on each):
+1. Specificity: lead with a real number from context in first 8 words. Use actual ₹ prices, percentages, counts, dates, source page numbers from the input.
+2. Category fit: dentists = peer-clinical tone, no "guaranteed/cure", cite sources; salons = warm-visual; restaurants = fast-operator voice using "covers/AOV"; gyms = coach voice; pharmacies = trustworthy-precise
+3. Merchant fit: use owner_first_name, locality, their exact offer title with ₹ price, their CTR number, their conversation history
+4. Trigger relevance: the trigger kind drives the message — research_digest means cite the paper; perf_dip means address the drop; recall_due means name the customer's recall window
+5. Engagement compulsion: use ONE of: loss aversion ("you're missing X"), social proof ("3 dentists nearby did Y"), curiosity ("want to see who?"), effort externalization ("I've drafted it — just say go"), single binary YES/STOP CTA
+
+HARD RULES:
+- Never invent data not in the context. If a number doesn't exist in the input, don't use it.
+- No promotional tone (no "AMAZING!", "Flat 30% off" generics)
+- No URLs in the message body
+- No multi-CTA (only one action per message)
+- No long preambles ("I hope you're doing well...")
+- No re-introduction after turn 1
+- If send_as is merchant_on_behalf (customer-facing): no medical claims, honor customer language preference
+- suppression_key format: "<trigger_kind>::<merchant_id>::<week>" for weekly dedup
+
+CONTEXT:
+Category: {category_json}
+Merchant: {merchant_json}
+Trigger: {trigger_json}
+Customer: {customer_json}
+
+Respond ONLY with valid JSON, no markdown, no preamble:
+{{
+  "body": "the WhatsApp message",
+  "cta": "open_ended | binary_yes_no | binary_confirm_cancel | multi_choice_slot | none",
+  "send_as": "vera | merchant_on_behalf",
+  "suppression_key": "...",
+  "rationale": "one sentence: which ONE signal drove this message and why",
+  "template_name": "vera_{kind}_v1",
+  "template_params": ["param1", "param2"]
+}}"""
+
+
 # ─────────────────────────────────────────────
 # COMPOSE — initial outbound message
 # ─────────────────────────────────────────────
@@ -253,34 +259,25 @@ def compose(
     customer: dict | None = None,
 ) -> dict:
     """Compose the first outbound WhatsApp message for a trigger."""
-    kind = trigger.get("kind", "")
-    hint = KIND_HINTS.get(kind, "Match trigger kind to appropriate framing.")
+    kind = trigger.get("kind", "generic")
 
-    parts = [
-        f"CATEGORY CONTEXT:\n{json.dumps(category, indent=2, ensure_ascii=False)}",
-        f"\nMERCHANT CONTEXT:\n{json.dumps(merchant, indent=2, ensure_ascii=False)}",
-        f"\nTRIGGER:\n{json.dumps(trigger, indent=2, ensure_ascii=False)}",
-    ]
-    if customer:
-        parts.append(
-            f"\nCUSTOMER CONTEXT:\n{json.dumps(customer, indent=2, ensure_ascii=False)}"
-        )
-
-    parts.append(
-        f"\nFRAMING HINT FOR trigger.kind='{kind}': {hint}"
-    )
-    parts.append(
-        "\nNow compose the WhatsApp message. Return ONLY valid JSON."
-    )
-
-    raw = call_llm("\n".join(parts))
+    system_prompt = build_system_prompt(kind, category, merchant, trigger, customer)
+    raw = call_llm(system_prompt, "Compose the next message for this merchant.")
     result = parse_llm_json(raw)
 
-    # Guarantee suppression_key comes from trigger
+    # Guarantee required fields
     if not result.get("suppression_key"):
         result["suppression_key"] = trigger.get(
-            "suppression_key", f"trg:{trigger.get('id', uuid.uuid4().hex[:8])}"
+            "suppression_key",
+            f"{kind}::{trigger.get('merchant_id', 'x')}::week"
         )
+    if not result.get("template_name"):
+        result["template_name"] = f"vera_{kind}_v1"
+    if not result.get("template_params"):
+        owner = (merchant.get("identity") or {}).get("owner_first_name", "Merchant")
+        words = (result.get("body") or "").split()
+        mid = len(words) // 2
+        result["template_params"] = [owner, " ".join(words[:mid]), " ".join(words[mid:])]
 
     # Strip any URLs that slipped in
     if "body" in result:
@@ -349,7 +346,12 @@ Return ONLY valid JSON:
   "rationale": "brief reasoning for this action"
 }}"""
 
-    raw = call_llm(prompt)
+    reply_system = """You are Vera, magicpin's merchant AI assistant on WhatsApp. This is a REPLY in an ongoing conversation.
+HARD RULES: No URLs. One CTA only. No re-introduction. No long preambles.
+If merchant said YES/confirmed → immediately switch to ACTION mode.
+Respond ONLY with valid JSON: {"action": "send|wait|end", "body": "...", "cta": "...", "wait_seconds": 0, "rationale": "..."}"""
+
+    raw = call_llm(reply_system, prompt)
     result = parse_llm_json(raw)
 
     if result.get("action") not in ("send", "wait", "end"):
@@ -530,20 +532,14 @@ async def tick(body: TickBody):
             "sent_bodies": {body_text},
         }
 
-        # Build template_params (3 slots)
-        owner = (merchant.get("identity") or {}).get("owner_first_name", "Merchant")
-        words = body_text.split()
-        mid = len(words) // 2
-        template_params = [owner, " ".join(words[:mid]), " ".join(words[mid:])]
-
         actions.append({
             "conversation_id": conv_id,
             "merchant_id": merchant_id,
             "customer_id": customer_id,
             "send_as": send_as,
             "trigger_id": trg_id,
-            "template_name": f"vera_{trg.get('kind', 'generic')}_v1",
-            "template_params": template_params,
+            "template_name": composed.get("template_name", f"vera_{trg.get('kind', 'generic')}_v1"),
+            "template_params": composed.get("template_params", []),
             "body": body_text,
             "cta": composed.get("cta", "open_ended"),
             "suppression_key": supp,
