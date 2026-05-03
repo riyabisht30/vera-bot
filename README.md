@@ -2,56 +2,53 @@
 
 ## Approach
 
-**Single LLM composer (Llama 3.3 70B via Groq) with trigger-kind dispatch and 4-context injection.**
+Single-prompt composer using Llama 3.3 70B (Groq) at temperature=0 with trigger-kind dispatch. Each trigger kind (`research_digest`, `perf_dip`, `recall_due`, `festival_upcoming`, `dormant_with_vera`, etc.) gets a specialised `PRIORITY` instruction prepended to a shared base system prompt that encodes all 5 scoring dimensions. All four context layers (category, merchant, trigger, customer) are injected into every call.
 
-Every outbound message is produced by feeding all four context layers (category, merchant, trigger, customer) into a single Gemini call with a carefully tuned system prompt. The prompt enforces all scoring dimensions explicitly:
+## Key design decisions
 
-- **Specificity** — system prompt requires citing the exact number/date/source from context; fabrication is a hard-banned instruction.
-- **Category fit** — category voice rules (`vocab_allowed`, `vocab_taboo`, tone) are injected verbatim; each trigger kind gets a framing hint (e.g., `research_digest` → "clinical peer tone, source citation at end").
-- **Merchant fit** — merchant's `owner_first_name`, performance numbers, active offers, signals, and `customer_aggregate` fields are all passed; the prompt instructs the model to anchor on the merchant's specific state.
-- **Trigger relevance** — the trigger object (including payload, urgency, kind) is passed in full; the framing hint for each `kind` instructs *why now*.
-- **Engagement compulsion** — 8 compulsion levers are listed in the system prompt; the model is instructed to use 1-2 per message with a single, end-of-message CTA.
+- **Dispatch layer** routes by `trigger.kind` before calling LLM, keeping prompts focused and trigger-relevant rather than generic
+- **Specificity enforcement** — system prompt requires a real number from context in the first 8 words; scored examples (10/10 vs 0/10) are shown inline so the model calibrates correctly
+- **Language detection** — checks `merchant.identity.languages`; injects Hinglish instruction for Hindi-speaking merchants to avoid the 2-point merchant-fit penalty for pure English
+- **Post-LLM validation** rejects URLs, multiple CTAs, and messages >400 chars with automatic re-prompt before returning the result
+- **Anti-repetition** — last message from `conversation_history` is surfaced in the prompt with an explicit "do NOT repeat this angle" instruction
+- **Auto-reply detection** uses phrase matching (turn 1: nudge owner, turn 2: wait 4h, turn 3: end)
+- **Intent transition detection** catches "yes/confirm/haan/kar do" at turn ≥ 2 to switch from qualify→execute mode, injecting `INTENT DETECTED` instruction to prevent further qualifying questions
+- **Out-of-scope deflection** catches unrelated asks (GST, legal, medical advice) and redirects back to the conversation topic
+- **Suppression keys** follow format `<trigger_kind>::<merchant_id>::<week>` for weekly dedup; tracked in-memory per session
 
-## Multi-turn conversation handling
+## Tradeoffs
 
-| Signal | Bot action |
-|---|---|
-| Auto-reply detected (keyword match) | Send one "looks like auto-reply, reply YES" prompt |
-| Same auto-reply twice | Wait 24 hours |
-| Auto-reply 3× in a row | End conversation |
-| Merchant says YES / "let's do it" | Immediately switch to action mode (no more qualifying) |
-| Merchant says "not interested" / "stop" | End + suppress |
-| Off-topic question (e.g., GST filing) | Politely decline, redirect to original topic |
+- In-memory state means a server restart loses context; acceptable for the test window but would need a persistent store (Redis/Postgres) in production
+- Single LLM call per `compose()` without retrieval; adding digest-item embedding retrieval would improve specificity on `research_digest` triggers by surfacing the most relevant clinical finding rather than the whole digest
+- `llama-3.1-8b-instant` used as runtime model for latency (sub-3s per call, fits within judge's 15s tick timeout); `llama-3.3-70b-versatile` produces higher-quality messages but exceeds the free-tier daily token budget at scale
 
-## Hard constraints enforced
+## What would help most with more context
 
-- URLs stripped from all outbound bodies (Meta policy, -3 penalty)
-- Suppression keys tracked in-memory — no duplicate sends for the same event
-- Anti-repetition guard — same body never sent twice in one conversation
-- Temperature = 0 for deterministic output
-
-## What additional context would have helped most
-
-1. **Real slot availability per merchant** — the dataset has `available_slots` in some triggers but not all; real booking calendar data would unlock much stronger recall/appointment messages.
-2. **Merchant's actual Google post history** — knowing *what* was posted (not just *when*) would let the bot avoid repetition and suggest genuinely new content.
-3. **Per-merchant language preference from conversation history** — the seed data shows languages `["en", "hi"]` for most merchants but production Vera would know which language the merchant *actually* replies in.
-4. **Category peer benchmarks at locality level** — the current `peer_stats` is city-scoped; locality-level comparison ("3 dentists in Lajpat Nagar") would dramatically sharpen social-proof messages.
+- **Real merchant conversation history at scale** — to calibrate when NOT to send (merchants who always ignore Vera need a different strategy, not more messages)
+- **Peer benchmark data by city + locality** — CTR peer medians vary significantly by micro-market, not just category; locality-level comparison ("3 dentists in Lajpat Nagar average 28 calls/week") would sharpen social-proof messages considerably
+- **Actual slot availability per merchant** — real booking calendar data would unlock precise recall/appointment messages instead of placeholder slot times
+- **Merchant's Google post history** — knowing what was posted (not just when) would let the bot suggest genuinely new content angles
 
 ## Running the bot
 
 ```bash
 pip install -r requirements.txt
+export GROQ_API_KEY=your_key_here
 uvicorn bot:app --host 0.0.0.0 --port 8080
 ```
-
-Set `GROQ_API_KEY` environment variable (or edit the default in `bot.py`).
 
 ## Generating submission.jsonl
 
 ```bash
-# First generate expanded dataset (from challenge folder)
-cd ../challenge && python generate_dataset.py --out ./expanded
+# Generate expanded dataset (run from challenge/ folder)
+python dataset/generate_dataset.py --seed-dir dataset --out expanded
 
-# Then compose the 30 test pairs
+# Compose all 30 test pairs
 cd ../vera-bot && python generate_submission.py
 ```
+
+## Live deployment
+
+Bot is deployed at: `https://web-production-7c1f0.up.railway.app`
+
+Healthcheck: `GET /v1/healthz` → `{"status": "ok", ...}`
