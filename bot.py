@@ -436,7 +436,7 @@ async def push_context(body: CtxBody):
     key = (body.scope, body.context_id)
     current = contexts.get(key)
 
-    if current and current["version"] >= body.version:
+    if current and current["version"] > body.version:
         return JSONResponse(
             status_code=409,
             content={"accepted": False, "reason": "stale_version",
