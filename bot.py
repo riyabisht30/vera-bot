@@ -308,61 +308,28 @@ Respond ONLY with valid JSON, no markdown, no preamble:
 # COMPOSE — initial outbound message
 # ─────────────────────────────────────────────
 
-def _validate_and_fix(system_prompt: str, result: dict) -> dict:
-    """Post-LLM validators: URL, multi-CTA, length. Re-call LLM once per violation."""
+def _validate_and_fix(result: dict) -> dict:
+    """Post-LLM validators: URL, multi-CTA, length. Fixed with string ops — no extra LLM calls."""
     body = result.get("body", "")
 
-    # 1. URL check
+    # 1. URL check — strip any links
     if re.search(r"https?://", body):
-        fix_prompt = (
-            f"CRITICAL: Remove all URLs from this message. No links allowed in WhatsApp outreach.\n"
-            f"Original message: {body}\n"
-            "Return the corrected message as JSON with same fields."
-        )
-        try:
-            raw = call_llm(system_prompt, fix_prompt)
-            fixed = parse_llm_json(raw)
-            body = fixed.get("body", body)
-            result.update(fixed)
-        except Exception:
-            body = strip_urls(body)
-        result["body"] = body
+        body = strip_urls(body)
 
-    # 2. Multi-question check (more than one "?")
-    body = result.get("body", "")
+    # 2. Multi-question check — keep only the last sentence containing "?"
     if body.count("?") > 1:
-        fix_prompt = (
-            f"CRITICAL: Only ONE CTA question allowed per message. Remove all but the last question.\n"
-            f"Original: {body}\nReturn corrected JSON."
-        )
-        try:
-            raw = call_llm(system_prompt, fix_prompt)
-            fixed = parse_llm_json(raw)
-            result.update(fixed)
-            body = result.get("body", body)
-        except Exception:
-            # Manual fix: keep only the last sentence with "?"
-            sentences = re.split(r'(?<=[.!?])\s+', body)
-            q_sentences = [s for s in sentences if "?" in s]
-            non_q = [s for s in sentences if "?" not in s]
-            result["body"] = " ".join(non_q + q_sentences[-1:])
-            body = result["body"]
+        sentences = re.split(r'(?<=[.!?])\s+', body.strip())
+        q_idx = [i for i, s in enumerate(sentences) if "?" in s]
+        if len(q_idx) > 1:
+            # Keep all non-question sentences + only the last question
+            keep = [s for i, s in enumerate(sentences) if "?" not in s or i == q_idx[-1]]
+            body = " ".join(keep)
 
-    # 3. Length check (> 400 chars)
-    body = result.get("body", "")
+    # 3. Length check — hard truncate at 400 chars, break at last word boundary
     if len(body) > 400:
-        fix_prompt = (
-            f"CRITICAL: Shorten this message to under 400 characters. "
-            "Cut the preamble, keep the specific hook and CTA.\n"
-            f"Original ({len(body)} chars): {body}\nReturn corrected JSON."
-        )
-        try:
-            raw = call_llm(system_prompt, fix_prompt)
-            fixed = parse_llm_json(raw)
-            result.update(fixed)
-        except Exception:
-            result["body"] = body[:397] + "..."
+        body = body[:400].rsplit(" ", 1)[0] + "…"
 
+    result["body"] = body.strip()
     return result
 
 
@@ -379,8 +346,8 @@ def compose(
     raw = call_llm(system_prompt, "Compose the next message for this merchant.")
     result = parse_llm_json(raw)
 
-    # Post-LLM validation: URL / multi-CTA / length
-    result = _validate_and_fix(system_prompt, result)
+    # Post-LLM validation: URL / multi-CTA / length (fast string fixes, no extra LLM calls)
+    result = _validate_and_fix(result)
 
     # Guarantee required fields
     if not result.get("suppression_key"):
@@ -603,9 +570,9 @@ async def tick(body: TickBody):
         urgency = trg.get("urgency", 1)
         trigger_payloads.append((urgency, trg_id, trg))
 
-    # Highest urgency first, cap at 3 per tick to stay within 15s judge timeout
+    # Highest urgency first, cap at 1 per tick to stay well within 15s judge timeout
     trigger_payloads.sort(key=lambda x: -x[0])
-    trigger_payloads = trigger_payloads[:3]
+    trigger_payloads = trigger_payloads[:1]
 
     actions = []
 
