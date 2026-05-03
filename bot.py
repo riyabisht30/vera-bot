@@ -10,6 +10,8 @@ import re
 import time
 import json
 import uuid
+import asyncio
+import concurrent.futures
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -29,6 +31,9 @@ CONTACT_EMAIL = "bisht.riya.angles@gmail.com"
 MODEL_NAME   = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
+
+# Persistent thread pool for non-blocking compose() calls in async endpoints
+_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 app = FastAPI(title="Vera Bot — magicpin AI Challenge")
 START_TIME = time.time()
@@ -187,7 +192,7 @@ KIND_PRIORITY: dict[str, str] = {
 
 def call_llm(system_prompt: str, user_message: str) -> str:
     """Call Groq LLM with retry on rate-limit errors."""
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             resp = groq_client.chat.completions.create(
                 model=MODEL_NAME,
@@ -197,13 +202,14 @@ def call_llm(system_prompt: str, user_message: str) -> str:
                 ],
                 temperature=0,
                 response_format={"type": "json_object"},
+                timeout=5,
             )
             return resp.choices[0].message.content
         except Exception as exc:
             err_str = str(exc)
             if "429" in err_str or "rate" in err_str.lower():
-                if attempt < 2:
-                    time.sleep(3)
+                if attempt < 1:
+                    time.sleep(1)
                     continue
             raise RuntimeError(f"Groq API error: {exc}")
     raise RuntimeError("Groq API: max retries exceeded")
@@ -597,7 +603,11 @@ async def tick(body: TickBody):
         customer = get_ctx("customer", customer_id) if customer_id else None
 
         try:
-            composed = compose(category, merchant, trg, customer)
+            loop = asyncio.get_event_loop()
+            composed = await asyncio.wait_for(
+                loop.run_in_executor(_thread_pool, compose, category, merchant, trg, customer),
+                timeout=8
+            )
         except Exception as e:
             continue
 
