@@ -261,19 +261,22 @@ SCORING DIMENSIONS (each 0-10, must score 9+ on each):
 
 3. MERCHANT FIT:
    - ALWAYS address by merchant.identity.owner_first_name (NOT "Hi" alone — missing name = -1)
-   - Use their locality, their exact offer title with ₹ price, their CTR number
+   - Mention their locality (merchant.identity.locality) — localisation scores +1
+   - Use their exact offer title with ₹ price from merchant.offers (not a generic offer)
+   - Reference their specific performance number (CTR, views, calls) to show you know their business
    - Honor conversation history — do not repeat angles already used
 
 4. TRIGGER RELEVANCE: trigger kind is the reason you are messaging RIGHT NOW.
    research_digest → cite paper title + page; perf_dip → name the exact % drop + metric;
    recall_due → customer name + days since last visit; festival_upcoming → festival name + days left
 
-5. ENGAGEMENT COMPULSION: Pick exactly ONE lever:
-   - Loss aversion: "you are missing X while competitors gain"
-   - Social proof: "N merchants in your area did Y this month"
-   - Curiosity: "want to see who?" / "want the breakdown?"
-   - Effort externalization: "I have drafted it — just say go"
-   - Single binary commit: Reply YES / STOP (never multi-choice)
+5. ENGAGEMENT COMPULSION: Pick exactly ONE lever AND end with a binary YES/STOP CTA:
+   - Loss aversion: "3 clinics in your area already updated — you are the only one missing this"
+   - Social proof: "N merchants in your locality did Y this month — want the same?"
+   - Curiosity: "want to see exactly who?" / "want the full breakdown? Takes 2 min."
+   - Effort externalization: "I have drafted the update — just say YES and I will send it"
+   - The CTA MUST be "Reply YES" or "Reply YES / STOP" — never open-ended for action triggers
+   - Weak ending ("let me know", "feel free to reach out") scores 0 on engagement
 
 RATIONALE FIELD: Must name exactly (a) trigger kind that fired, (b) specific merchant signal that made it relevant (e.g. ctr_below_peer_median, high_risk_adult_cohort), (c) which compulsion lever chosen and why. One sentence max.
 
