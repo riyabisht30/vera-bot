@@ -112,7 +112,13 @@ NEGATIVE_INTENT_PHRASES = [
     "not interested", "stop messaging", "don't message", "do not message",
     "nahi chahiye", "band karo", "mat karo", "bhejo mat", "unsubscribe",
     "why are you bothering", "useless", "annoying", "stop sending",
-    "leave me alone",
+    "leave me alone", "bothering me", "stop",
+]
+
+OUT_OF_SCOPE_PHRASES = [
+    "gst", "income tax", "legal advice", "labour law", "rent agreement",
+    "personal loan", "medical advice", "doctor", "lawyer", "advocate",
+    "filing", "court", "police", "property dispute", "divorce",
 ]
 
 def is_positive_intent(msg: str) -> bool:
@@ -121,6 +127,10 @@ def is_positive_intent(msg: str) -> bool:
 def is_negative_intent(msg: str) -> bool:
     low = msg.lower()
     return any(p in low for p in NEGATIVE_INTENT_PHRASES)
+
+def is_out_of_scope(msg: str) -> bool:
+    low = msg.lower()
+    return any(p in low for p in OUT_OF_SCOPE_PHRASES)
 
 
 # ─────────────────────────────────────────────
@@ -298,6 +308,7 @@ def compose_reply(
     history: list[dict],
     merchant_message: str,
     turn_number: int,
+    intent_confirmed: bool = False,
 ) -> dict:
     """Compose the bot's reply to a merchant message in an ongoing conversation."""
     history_text = "\n".join(
@@ -313,11 +324,20 @@ def compose_reply(
         if customer else ""
     )
 
+    intent_instruction = ""
+    if intent_confirmed:
+        intent_instruction = (
+            "\nINTENT DETECTED: merchant said yes/confirmed. "
+            "Do NOT ask more qualifying questions. "
+            "Draft the actual artifact they agreed to, name the exact deliverable, "
+            "give a CONFIRM CTA.\n"
+        )
+
     prompt = f"""CONVERSATION HISTORY:
 {history_text}
 
 [MERCHANT (turn {turn_number})]: {merchant_message}
-
+{intent_instruction}
 MERCHANT CONTEXT:
 {json.dumps(merchant, indent=2, ensure_ascii=False)}
 
@@ -332,8 +352,6 @@ REPLY INSTRUCTIONS:
 - If merchant said YES / "let's do it" / "go ahead" / committed in any way:
   → IMMEDIATELY switch to ACTION mode (draft content, confirm slot, etc.)
   → Do NOT ask another qualifying question — this loses major points.
-- If merchant asked an off-topic question (e.g., GST filing, personal matter):
-  → Decline politely in one sentence, then redirect back to the original topic.
 - If merchant seems confused or needs clarification: ask ONE clarifying question.
 - No URLs in body.
 
@@ -568,65 +586,67 @@ async def reply_endpoint(body: ReplyBody):
     if not conv or conv.get("ended"):
         return {"action": "end", "rationale": "Conversation ended or not found."}
 
-    # Record incoming turn
-    conv["turns"].append({"from": body.from_role, "body": msg})
+    # Store turn with full metadata
+    conv["turns"].append({
+        "from_role": body.from_role,
+        "from": body.from_role,
+        "body": msg,
+        "ts": body.received_at,
+        "turn_number": body.turn_number,
+    })
 
-    # ── 1. Hard negative intent ──
-    if is_negative_intent(msg):
-        conv["ended"] = True
-        return {
-            "action": "end",
-            "rationale": (
-                "Merchant explicitly opted out. Closing; suppressing all pending triggers "
-                "for this merchant for 30 days."
-            ),
-        }
-
-    # ── 2. Auto-reply detection ──
-    prev_count = conv.get("auto_reply_count", 0)
-    is_ar = is_auto_reply(msg)
-
-    # Also detect repeated message (same text as two turns ago)
     turns = conv["turns"]
+
+    # ── STEP 1: AUTO-REPLY DETECTION (check before anything else) ──
+    is_ar = is_auto_reply(msg)
     same_as_prev = (
         len(turns) >= 3 and
         turns[-1]["body"].strip().lower() == turns[-3]["body"].strip().lower()
-        if len(turns) >= 3 else False
     )
 
     if is_ar or same_as_prev:
+        prev_count = conv.get("auto_reply_count", 0)
         new_count = prev_count + 1
         conv["auto_reply_count"] = new_count
 
         if new_count == 1:
             reply_body = (
-                "Looks like an auto-reply 🙂 "
-                "When the owner sees this, just reply 'YES' to continue."
+                "Looks like an auto-reply — when you see this, just reply YES to continue. \U0001f64f"
             )
-            conv["turns"].append({"from": "vera", "body": reply_body})
+            conv["turns"].append({"from": "vera", "body": reply_body,
+                                   "ts": now_iso(), "turn_number": body.turn_number + 1})
             return {
                 "action": "send",
                 "body": reply_body,
                 "cta": "binary_yes_no",
-                "rationale": "Detected auto-reply; sending one prompt for owner attention.",
+                "rationale": "Detected auto-reply turn 1; surfacing for owner",
             }
         elif new_count == 2:
             return {
                 "action": "wait",
-                "wait_seconds": 86400,
-                "rationale": "Same auto-reply twice. Owner unavailable. Backing off 24h.",
+                "wait_seconds": 14400,
+                "rationale": "Auto-reply second time; backing off 4h for owner",
             }
         else:
             conv["ended"] = True
             return {
                 "action": "end",
-                "rationale": "Auto-reply 3× in a row. No real engagement. Closing conversation.",
+                "rationale": "3 consecutive auto-replies; no engagement signal, closing",
             }
 
     # Real message — reset auto-reply counter
     conv["auto_reply_count"] = 0
 
-    # ── 3. Load contexts for reply composition ──
+    # ── STEP 2: OPT-OUT DETECTION ──
+    if is_negative_intent(msg):
+        conv["ended"] = True
+        fired_keys.add(conv.get("suppression_key", ""))
+        return {
+            "action": "end",
+            "rationale": "Merchant explicitly opted out; suppressing conversation",
+        }
+
+    # ── Load contexts for steps 3-5 ──
     merchant_id = conv.get("merchant_id") or body.merchant_id
     merchant = get_ctx("merchant", merchant_id) if merchant_id else None
 
@@ -649,11 +669,47 @@ async def reply_endpoint(body: ReplyBody):
             "rationale": "Missing merchant/category context; falling back to generic ack.",
         }
 
-    # ── 4. Compose reply ──
+    # ── STEP 3: INTENT TRANSITION ──
+    if body.turn_number >= 2 and is_positive_intent(msg):
+        try:
+            result = compose_reply(
+                category, merchant, trigger, customer,
+                conv["turns"][:-1],
+                msg,
+                body.turn_number,
+                intent_confirmed=True,
+            )
+        except Exception as e:
+            result = {
+                "action": "send",
+                "body": "Got it! Let me draft that for you right now.",
+                "cta": "binary_confirm_cancel",
+                "rationale": f"Intent confirmed; compose error: {e}",
+            }
+        _store_reply_turn(conv, result, body.turn_number)
+        return result
+
+    # ── STEP 4: OUT-OF-SCOPE DEFLECTION ──
+    if is_out_of_scope(msg):
+        topic = conv.get("trigger_id", "your growth")
+        deflect_body = (
+            f"That's outside what I can help with — "
+            f"let's get back to {topic.replace('_', ' ')} when you're ready!"
+        )
+        conv["turns"].append({"from": "vera", "body": deflect_body,
+                               "ts": now_iso(), "turn_number": body.turn_number + 1})
+        return {
+            "action": "send",
+            "body": deflect_body,
+            "cta": "open_ended",
+            "rationale": "Out-of-scope ask deflected; conversation redirected",
+        }
+
+    # ── STEP 5: DEFAULT — pass full history to compose ──
     try:
         result = compose_reply(
             category, merchant, trigger, customer,
-            conv["turns"][:-1],   # history before this latest turn
+            conv["turns"][:-1],
             msg,
             body.turn_number,
         )
@@ -665,23 +721,24 @@ async def reply_endpoint(body: ReplyBody):
             "rationale": f"Compose error: {e}",
         }
 
-    action = result.get("action", "send")
+    _store_reply_turn(conv, result, body.turn_number)
+    return result
 
-    if action == "end":
+
+def _store_reply_turn(conv: dict, result: dict, turn_number: int):
+    """Store vera's reply turn and handle anti-repetition."""
+    if result.get("action") == "end":
         conv["ended"] = True
-    elif action == "send":
+    elif result.get("action") == "send":
         reply_body = (result.get("body") or "").strip()
-
-        # Anti-repetition: if we already sent this exact body, tweak it
         sent = conv.setdefault("sent_bodies", set())
         if reply_body in sent:
             reply_body += " Kuch aur chahiye to bataiye!"
         if reply_body:
             sent.add(reply_body)
-            conv["turns"].append({"from": "vera", "body": reply_body})
+            conv["turns"].append({"from": "vera", "body": reply_body,
+                                   "ts": now_iso(), "turn_number": turn_number + 1})
         result["body"] = reply_body
-
-    return result
 
 
 @app.post("/v1/teardown")
