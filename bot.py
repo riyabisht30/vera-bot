@@ -219,26 +219,72 @@ def build_system_prompt(kind: str, category: dict, merchant: dict,
     trigger_json   = json.dumps(trigger,   indent=2, ensure_ascii=False)
     customer_json  = json.dumps(customer,  indent=2, ensure_ascii=False) if customer else "none"
 
+    # Build anti-repetition hint from conversation history
+    conv_history = (merchant.get("conversation_history") or [])
+    anti_repeat = ""
+    if conv_history:
+        last_msg = conv_history[-1].get("body", "") if isinstance(conv_history[-1], dict) else str(conv_history[-1])
+        if last_msg:
+            anti_repeat = (
+                f"\nANTI-REPETITION: The previous message was: \"{last_msg[:120]}\". "
+                "Do NOT repeat the same angle or lever. Use a different compulsion."
+            )
+
+    # Language hint
+    languages = (merchant.get("identity") or {}).get("languages", ["en"])
+    lang_hint = ""
+    if "hi" in languages:
+        lang_hint = (
+            "\nLANGUAGE: Merchant speaks Hindi. Write in natural Hinglish (Hindi-English mix). "
+            "Examples: 'Apke liye 2 slots ready hain — kar dun?', 'Chalega?', "
+            "'18 patients ne last month visit ki — dekh lein?'. "
+            "Pure English for Hindi-speaking merchants loses 2 points on merchant fit."
+        )
+
     return f"""You are Vera, magicpin's merchant AI assistant on WhatsApp. Compose ONE message.
 
-{priority}
+{priority}{anti_repeat}{lang_hint}
 
 SCORING DIMENSIONS (each 0-10, must score 9+ on each):
-1. Specificity: lead with a real number from context in first 8 words. Use actual ₹ prices, percentages, counts, dates, source page numbers from the input.
-2. Category fit: dentists = peer-clinical tone, no "guaranteed/cure", cite sources; salons = warm-visual; restaurants = fast-operator voice using "covers/AOV"; gyms = coach voice; pharmacies = trustworthy-precise
-3. Merchant fit: use owner_first_name, locality, their exact offer title with ₹ price, their CTR number, their conversation history
-4. Trigger relevance: the trigger kind drives the message — research_digest means cite the paper; perf_dip means address the drop; recall_due means name the customer's recall window
-5. Engagement compulsion: use ONE of: loss aversion ("you're missing X"), social proof ("3 dentists nearby did Y"), curiosity ("want to see who?"), effort externalization ("I've drafted it — just say go"), single binary YES/STOP CTA
+
+1. SPECIFICITY (most important): The FIRST 8 WORDS of body MUST contain a real number from context.
+   Score 10: "190 people in your locality are searching", "2,100-patient trial showed 34%", "Your CTR dropped to 2.1%", "78 patients haven't visited in 180 days"
+   Score 0: "Hi Dr. Meera, I wanted to tell you", "Hope you are doing well", "Just checking in"
+   Rule: If no number in first 8 words → automatic 0 on specificity.
+
+2. CATEGORY FIT:
+   - dentists: peer-clinical tone, no "guaranteed/cure/miracle", cite source (journal/page)
+   - salons: warm-visual, mention service names + ₹ price
+   - restaurants: fast-operator voice, use "covers/AOV/thali", no fluff
+   - gyms: coach voice, use "slots/members/capacity %"
+   - pharmacies: trustworthy-precise, exact drug names, no overclaims
+
+3. MERCHANT FIT:
+   - ALWAYS address by merchant.identity.owner_first_name (NOT "Hi" alone — missing name = -1)
+   - Use their locality, their exact offer title with ₹ price, their CTR number
+   - Honor conversation history — do not repeat angles already used
+
+4. TRIGGER RELEVANCE: trigger kind is the reason you are messaging RIGHT NOW.
+   research_digest → cite paper title + page; perf_dip → name the exact % drop + metric;
+   recall_due → customer name + days since last visit; festival_upcoming → festival name + days left
+
+5. ENGAGEMENT COMPULSION: Pick exactly ONE lever:
+   - Loss aversion: "you are missing X while competitors gain"
+   - Social proof: "N merchants in your area did Y this month"
+   - Curiosity: "want to see who?" / "want the breakdown?"
+   - Effort externalization: "I have drafted it — just say go"
+   - Single binary commit: Reply YES / STOP (never multi-choice)
+
+RATIONALE FIELD: Must name exactly (a) trigger kind that fired, (b) specific merchant signal that made it relevant (e.g. ctr_below_peer_median, high_risk_adult_cohort), (c) which compulsion lever chosen and why. One sentence max.
 
 HARD RULES:
-- Never invent data not in the context. If a number doesn't exist in the input, don't use it.
-- No promotional tone (no "AMAZING!", "Flat 30% off" generics)
-- No URLs in the message body
-- No multi-CTA (only one action per message)
-- No long preambles ("I hope you're doing well...")
-- No re-introduction after turn 1
-- If send_as is merchant_on_behalf (customer-facing): no medical claims, honor customer language preference
-- suppression_key format: "<trigger_kind>::<merchant_id>::<week>" for weekly dedup
+- Never invent numbers not in context
+- No URLs in body (Meta policy — hard ban)
+- Exactly ONE question / CTA at end
+- Under 400 characters total
+- No "FREE" in caps, no "AMAZING", no generic "Flat X% off"
+- No long preambles
+- suppression_key format: "<trigger_kind>::<merchant_id>::<week>"
 
 CONTEXT:
 Category: {category_json}
@@ -252,7 +298,7 @@ Respond ONLY with valid JSON, no markdown, no preamble:
   "cta": "open_ended | binary_yes_no | binary_confirm_cancel | multi_choice_slot | none",
   "send_as": "vera | merchant_on_behalf",
   "suppression_key": "...",
-  "rationale": "one sentence: which ONE signal drove this message and why",
+  "rationale": "one sentence naming: trigger kind + merchant signal + compulsion lever",
   "template_name": "vera_{kind}_v1",
   "template_params": ["param1", "param2"]
 }}"""
@@ -261,6 +307,64 @@ Respond ONLY with valid JSON, no markdown, no preamble:
 # ─────────────────────────────────────────────
 # COMPOSE — initial outbound message
 # ─────────────────────────────────────────────
+
+def _validate_and_fix(system_prompt: str, result: dict) -> dict:
+    """Post-LLM validators: URL, multi-CTA, length. Re-call LLM once per violation."""
+    body = result.get("body", "")
+
+    # 1. URL check
+    if re.search(r"https?://", body):
+        fix_prompt = (
+            f"CRITICAL: Remove all URLs from this message. No links allowed in WhatsApp outreach.\n"
+            f"Original message: {body}\n"
+            "Return the corrected message as JSON with same fields."
+        )
+        try:
+            raw = call_llm(system_prompt, fix_prompt)
+            fixed = parse_llm_json(raw)
+            body = fixed.get("body", body)
+            result.update(fixed)
+        except Exception:
+            body = strip_urls(body)
+        result["body"] = body
+
+    # 2. Multi-question check (more than one "?")
+    body = result.get("body", "")
+    if body.count("?") > 1:
+        fix_prompt = (
+            f"CRITICAL: Only ONE CTA question allowed per message. Remove all but the last question.\n"
+            f"Original: {body}\nReturn corrected JSON."
+        )
+        try:
+            raw = call_llm(system_prompt, fix_prompt)
+            fixed = parse_llm_json(raw)
+            result.update(fixed)
+            body = result.get("body", body)
+        except Exception:
+            # Manual fix: keep only the last sentence with "?"
+            sentences = re.split(r'(?<=[.!?])\s+', body)
+            q_sentences = [s for s in sentences if "?" in s]
+            non_q = [s for s in sentences if "?" not in s]
+            result["body"] = " ".join(non_q + q_sentences[-1:])
+            body = result["body"]
+
+    # 3. Length check (> 400 chars)
+    body = result.get("body", "")
+    if len(body) > 400:
+        fix_prompt = (
+            f"CRITICAL: Shorten this message to under 400 characters. "
+            "Cut the preamble, keep the specific hook and CTA.\n"
+            f"Original ({len(body)} chars): {body}\nReturn corrected JSON."
+        )
+        try:
+            raw = call_llm(system_prompt, fix_prompt)
+            fixed = parse_llm_json(raw)
+            result.update(fixed)
+        except Exception:
+            result["body"] = body[:397] + "..."
+
+    return result
+
 
 def compose(
     category: dict,
@@ -274,6 +378,9 @@ def compose(
     system_prompt = build_system_prompt(kind, category, merchant, trigger, customer)
     raw = call_llm(system_prompt, "Compose the next message for this merchant.")
     result = parse_llm_json(raw)
+
+    # Post-LLM validation: URL / multi-CTA / length
+    result = _validate_and_fix(system_prompt, result)
 
     # Guarantee required fields
     if not result.get("suppression_key"):
@@ -289,7 +396,7 @@ def compose(
         mid = len(words) // 2
         result["template_params"] = [owner, " ".join(words[:mid]), " ".join(words[mid:])]
 
-    # Strip any URLs that slipped in
+    # Final URL strip (safety net)
     if "body" in result:
         result["body"] = strip_urls(result["body"])
 
