@@ -25,7 +25,7 @@ from groq import Groq
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 TEAM_NAME    = "Riya Bisht"
 TEAM_MEMBERS = ["Riya Bisht"]
-CONTACT_EMAIL = "riyabisht30@gmail.com"
+CONTACT_EMAIL = "bisht.riya.angles@gmail.com"
 MODEL_NAME   = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
