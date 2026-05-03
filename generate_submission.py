@@ -165,21 +165,22 @@ def process_pair(test_id: str, pair: dict) -> dict | None:
 
     customer = get_ctx("customer", customer_id) if customer_id else None
 
+    t0 = time.time()
     try:
         result = compose(category, merchant, trigger, customer)
     except Exception as e:
         print(f"  [{test_id}] ERROR composing: {e}")
-        return None
+        return {"test_id": test_id, "error": str(e)}
 
+    elapsed = time.time() - t0
     body_text = (result.get("body") or "").strip()
     if not body_text:
         print(f"  [{test_id}] WARN — empty body")
-        return None
+        return {"test_id": test_id, "error": "empty body"}
 
-    name_safe = merchant.get('identity', {}).get('name', merchant_id)[:40].encode('ascii', 'replace').decode()
-    body_safe = body_text[:80].encode('ascii', 'replace').decode()
-    print(f"  [{test_id}] OK  - {name_safe}  | {trigger.get('kind', '?')}")
-    print(f"         body: {body_safe}...")
+    name_safe = merchant.get('identity', {}).get('name', merchant_id)[:30].encode('ascii', 'replace').decode()
+    body_safe = body_text[:60].encode('ascii', 'replace').decode()
+    print(f"  {test_id}: {name_safe} — {trigger.get('kind', '?')} ... OK ({elapsed:.1f}s)")
 
     return {
         "test_id": test_id,
@@ -207,14 +208,18 @@ def main():
 
     pairs = get_test_pairs(EXPANDED_DIR if EXPANDED_DIR.exists() else expanded_dir)
 
-    # Load already-generated pairs so we can resume if interrupted
+    # Load already-generated pairs so we can resume if interrupted (skip errors)
     existing: dict[str, dict] = {}
     if OUT_FILE.exists():
         with open(OUT_FILE, encoding="utf-8") as f:
             for line in f:
-                row = json.loads(line.strip())
-                existing[row["test_id"]] = row
-        print(f"Resuming: {len(existing)} already done.\n")
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                if "error" not in row:   # only keep successful entries
+                    existing[row["test_id"]] = row
+        print(f"Resuming: {len(existing)} already done (errors will be retried).\n")
 
     print(f"\nComposing {len(pairs)} messages...\n")
     results = list(existing.values())
@@ -230,16 +235,17 @@ def main():
             with open(OUT_FILE, "w", encoding="utf-8") as f:
                 for r in sorted(results, key=lambda x: x["test_id"]):
                     f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        time.sleep(4)   # stay well within 15 req/min limit for gemini-2.0-flash
+        time.sleep(1)   # Groq free tier: ~30 req/min, 1s gap is enough
 
     # Final sorted write
     with open(OUT_FILE, "w", encoding="utf-8") as f:
         for row in sorted(results, key=lambda x: x["test_id"]):
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    print(f"\nDone! Written {len(results)} lines to {OUT_FILE}")
-    if len(results) < 30:
-        print(f"  WARNING: Only {len(results)}/30 pairs completed.")
+    succeeded = sum(1 for r in results if "error" not in r)
+    print(f"\nDone. {succeeded}/30 succeeded.")
+    if succeeded < 30:
+        print(f"  WARNING: {30 - succeeded} pairs failed — check errors above.")
 
 
 if __name__ == "__main__":

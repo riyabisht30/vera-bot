@@ -26,7 +26,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 TEAM_NAME    = "VeraBuilder"
 TEAM_MEMBERS = ["Vera Participant"]
 CONTACT_EMAIL = "participant@example.com"
-MODEL_NAME   = "llama-3.3-70b-versatile"   # best free Groq model
+MODEL_NAME   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
