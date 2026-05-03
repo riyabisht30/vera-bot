@@ -385,7 +385,7 @@ async def metadata():
         "team_members": TEAM_MEMBERS,
         "model": "llama-3.3-70b-versatile (Groq)",
         "approach": (
-            "4-context LLM composer (Gemini 1.5 Flash) with trigger-kind dispatch, "
+            "4-context LLM composer (Llama 3.3 70B via Groq) with trigger-kind dispatch, "
             "auto-reply detection (3-strike exit), intent-transition routing, "
             "suppression key tracking, and anti-repetition guards."
         ),
@@ -476,9 +476,9 @@ async def tick(body: TickBody):
         urgency = trg.get("urgency", 1)
         trigger_payloads.append((urgency, trg_id, trg))
 
-    # Highest urgency first, cap at 5
+    # Highest urgency first, cap at 20
     trigger_payloads.sort(key=lambda x: -x[0])
-    trigger_payloads = trigger_payloads[:5]
+    trigger_payloads = trigger_payloads[:20]
 
     actions = []
 
